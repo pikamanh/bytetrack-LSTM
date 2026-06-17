@@ -1,0 +1,160 @@
+Input:
+    Frame I_t
+    Active tracks T_{t-1}
+    Previous LNN states {h_i}
+    Previous Kalman states {KF_i}
+
+1. Detector tạo detections D_t
+       D_t = {d_j}
+       mỗi detection gồm:
+           bbox_j = [cx, cy, w, h]
+           score_j
+           appearance embedding e_j, optional
+
+2. Với mỗi active track i:
+       2.1. Kalman prediction
+            bbox_KF_i, P_KF_i = Kalman_i.predict()
+
+       2.2. Chuẩn bị input cho LNN
+            x_i,t = [
+                last_bbox_i,
+                velocity_i,
+                acceleration_i, optional
+                Δt_i,
+                is_missing_i,
+                missing_count_i,
+                detection_confidence_i
+            ]
+
+       2.3. LNN residual prediction
+            residual_i, log_var_i, h_i,t = LNN.predict(
+                x_i,t,
+                h_i,t-1,
+                Δt_i,
+                is_missing_i
+            )
+
+       2.4. Missing-aware residual scaling
+            α_i = α0 * exp(-β * missing_count_i)
+
+       2.5. Final bbox prediction
+            bbox_pred_i = bbox_KF_i + α_i * residual_i
+
+       2.6. Final uncertainty
+            uncertainty_i = P_KF_i + softplus(log_var_i)
+
+3. Tính cost giữa predicted tracks và detections
+       Với mỗi track i và detection j:
+
+       motion_cost_ij =
+           Mahalanobis(bbox_pred_i, bbox_j, uncertainty_i)
+
+       iou_cost_ij =
+           1 - IoU(bbox_pred_i, bbox_j)
+
+       appearance_cost_ij =
+           1 - cosine_similarity(track_app_i, e_j), optional
+
+       total_cost_ij =
+           λ_motion * motion_cost_ij
+         + λ_iou    * iou_cost_ij
+         + λ_app    * appearance_cost_ij
+
+4. Gating
+       Loại pair (i, j) nếu:
+           Mahalanobis distance quá lớn
+           hoặc IoU quá thấp khi uncertainty thấp
+           hoặc appearance distance quá lớn, nếu dùng ReID
+
+5. Hungarian matching
+       matched_pairs, unmatched_tracks, unmatched_detections =
+           Hungarian(total_cost)
+
+6. Với matched track i ↔ detection j:
+       6.1. Kalman update
+            Kalman_i.update(bbox_j)
+
+       6.2. LNN update bằng detection thật
+            x_i,t_real = [
+                bbox_j,
+                velocity_from_detection,
+                Δt_i,
+                is_missing = 0,
+                missing_count = 0,
+                score_j
+            ]
+
+            h_i,t = LNN.update(
+                x_i,t_real,
+                h_i,t,
+                Δt_i,
+                is_missing = 0
+            )
+
+       6.3. Update track state
+            track_i.bbox = bbox_j
+            track_i.last_observed_bbox = bbox_j
+            track_i.missing_count = 0
+            track_i.is_missing = 0
+            track_i.age += 1
+            track_i.h_lnn = h_i,t
+
+       6.4. Update appearance memory, nếu có
+            track_i.app = EMA(track_i.app, e_j)
+
+7. Với unmatched track i:
+       7.1. Không có detection thật
+
+       7.2. Dùng predicted bbox để duy trì state
+            pseudo_bbox_i = bbox_pred_i.detach()
+
+       7.3. LNN update bằng pseudo input
+            x_i,t_missing = [
+                pseudo_bbox_i,
+                predicted_velocity_i,
+                Δt_i,
+                is_missing = 1,
+                missing_count_i + 1,
+                confidence = 0
+            ]
+
+            h_i,t = LNN.update(
+                x_i,t_missing,
+                h_i,t,
+                Δt_i,
+                is_missing = 1
+            )
+
+       7.4. Update track state
+            track_i.bbox = pseudo_bbox_i
+            track_i.missing_count += 1
+            track_i.is_missing = 1
+            track_i.h_lnn = h_i,t
+
+       7.5. Nếu missing_count > max_age:
+            terminate track
+
+8. Với unmatched detection j:
+       8.1. Tạo new track
+            new_track.bbox = bbox_j
+            new_track.Kalman = init_Kalman(bbox_j)
+
+       8.2. Init LNN state
+            h_new = init_LNN_state()
+
+       8.3. Init LNN history/input
+            x_new = [
+                bbox_j,
+                velocity = 0,
+                Δt = 1,
+                is_missing = 0,
+                missing_count = 0,
+                score_j
+            ]
+
+            h_new = LNN.update(x_new, h_new)
+
+       8.4. Init appearance memory, nếu có
+            new_track.app = e_j
+
+9. Output active confirmed tracks
