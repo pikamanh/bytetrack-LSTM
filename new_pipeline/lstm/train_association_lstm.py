@@ -59,6 +59,19 @@ def make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--encoder_lr", type=float, default=1e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--grad_clip", type=float, default=5.0)
+    parser.add_argument("--warmup_epochs", type=int, default=2)
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=8,
+        help="Early stopping patience (epochs without val improvement)",
+    )
+    parser.add_argument(
+        "--save_every",
+        type=int,
+        default=5,
+        help="Save numbered checkpoint every N epochs (best.pth always saved)",
+    )
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--device", default=None)
@@ -105,6 +118,12 @@ def load_lstm_checkpoint(model: LSTMPredictor, path: str, device: torch.device):
     ckpt = torch.load(path, map_location=device)
     model.load_state_dict(ckpt["model"] if "model" in ckpt else ckpt)
     print(f"[train_assoc] loaded LSTM encoder: {path}")
+
+
+def warmup_lambda(epoch: int, warmup_epochs: int) -> float:
+    if epoch < warmup_epochs:
+        return (epoch + 1) / max(warmup_epochs, 1)
+    return 1.0
 
 
 def run_epoch(
@@ -184,12 +203,13 @@ def run_epoch(
     }
 
 
-def save_checkpoint(path: str, head, optimizer, epoch: int, metrics: dict, args):
+def save_checkpoint(path: str, head, optimizer, scheduler, epoch: int, metrics: dict, args):
     torch.save(
         {
             "epoch": epoch,
             "model": head.state_dict(),
             "optimizer": optimizer.state_dict(),
+            "scheduler": scheduler.state_dict(),
             "metrics": metrics,
             "args": vars(args),
             "head_type": "AssociationScoreHead",
@@ -251,6 +271,12 @@ def main():
         params = head.parameters()
 
     optimizer = optim.AdamW(params, lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=args.epochs, eta_min=args.lr * 0.01
+    )
+    warmup = optim.lr_scheduler.LambdaLR(
+        optimizer, lr_lambda=lambda e: warmup_lambda(e, args.warmup_epochs)
+    )
     num_pos, num_neg = label_counts(train_ds)
     pos_weight = torch.tensor([max(num_neg / max(num_pos, 1), 1.0)], device=device)
     criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
@@ -261,15 +287,19 @@ def main():
 
     start_epoch = 0
     best_val = float("inf")
+    patience_counter = 0
     if args.resume and os.path.isfile(args.resume):
         ckpt = torch.load(args.resume, map_location=device)
         head.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
+        if "scheduler" in ckpt:
+            scheduler.load_state_dict(ckpt["scheduler"])
         start_epoch = ckpt.get("epoch", -1) + 1
         best_val = ckpt.get("metrics", {}).get("loss", best_val)
         print(f"[train_assoc] resumed {args.resume} at epoch {start_epoch}")
 
     for epoch in range(start_epoch, args.epochs):
+        lr = optimizer.param_groups[0]["lr"]
         train_metrics = run_epoch(
             encoder,
             head,
@@ -296,18 +326,59 @@ def main():
                 f"val {epoch + 1}/{args.epochs}",
             )
 
+        if epoch < args.warmup_epochs:
+            warmup.step()
+        else:
+            scheduler.step()
+
+        improved = val_metrics["loss"] < best_val
+        flag = " <- best" if improved else ""
         print(
-            f"[epoch {epoch + 1:03d}] "
+            f"[epoch {epoch + 1:03d}/{args.epochs}] "
             f"train_loss={train_metrics['loss']:.4f} train_acc={train_metrics['acc']:.3f} "
             f"val_loss={val_metrics['loss']:.4f} val_acc={val_metrics['acc']:.3f} "
-            f"val_pos={val_metrics['pos_score']:.3f} val_neg={val_metrics['neg_score']:.3f}"
+            f"val_pos={val_metrics['pos_score']:.3f} val_neg={val_metrics['neg_score']:.3f} "
+            f"lr={lr:.2e}{flag}"
         )
 
-        save_checkpoint(os.path.join(args.save_dir, "last.pth"), head, optimizer, epoch, val_metrics, args)
-        if val_metrics["loss"] < best_val:
+        save_checkpoint(
+            os.path.join(args.save_dir, "last.pth"),
+            head,
+            optimizer,
+            scheduler,
+            epoch,
+            val_metrics,
+            args,
+        )
+        if args.save_every > 0 and (epoch + 1) % args.save_every == 0:
+            save_checkpoint(
+                os.path.join(args.save_dir, f"epoch_{epoch + 1:03d}.pth"),
+                head,
+                optimizer,
+                scheduler,
+                epoch,
+                val_metrics,
+                args,
+            )
+
+        if improved:
             best_val = val_metrics["loss"]
-            save_checkpoint(os.path.join(args.save_dir, "best.pth"), head, optimizer, epoch, val_metrics, args)
+            patience_counter = 0
+            save_checkpoint(
+                os.path.join(args.save_dir, "best.pth"),
+                head,
+                optimizer,
+                scheduler,
+                epoch,
+                val_metrics,
+                args,
+            )
             print(f"[train_assoc] saved best: {best_val:.4f}")
+        else:
+            patience_counter += 1
+            if patience_counter >= args.patience:
+                print(f"[train_assoc] early stop at epoch {epoch + 1}")
+                break
 
 
 if __name__ == "__main__":
