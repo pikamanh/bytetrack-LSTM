@@ -22,20 +22,6 @@ class STrack(BaseTrack):
 
         self.score = score
         self.tracklet_len = 0
-        self.history = []
-
-    def _save_history(self, frame_id):
-        """Lưu lại tọa độ và vận tốc từ Kalman Filter để KAN sử dụng"""
-        if self.mean is not None:
-            # self.mean có 8 chiều: [cx, cy, ratio, height, vx, vy, va, vh]
-            cx, cy, a, h, vx, vy, va, vh = self.mean
-            w = a * h
-            self.history.append({
-                'frame_id': frame_id, 'cx': cx, 'cy': cy, 'w': w, 'h': h, 'vx': vx, 'vy': vy
-            })
-            # Chỉ giữ lại 10 frame gần nhất để tối ưu bộ nhớ
-            if len(self.history) > 10:
-                self.history.pop(0)
 
     def predict(self):
         mean_state = self.mean.copy()
@@ -66,9 +52,9 @@ class STrack(BaseTrack):
         self.state = TrackState.Tracked
         if frame_id == 1:
             self.is_activated = True
+        # self.is_activated = True
         self.frame_id = frame_id
         self.start_frame = frame_id
-        self._save_history(frame_id) # THÊM DÒNG NÀY
 
     def re_activate(self, new_track, frame_id, new_id=False):
         self.mean, self.covariance = self.kalman_filter.update(
@@ -81,7 +67,6 @@ class STrack(BaseTrack):
         if new_id:
             self.track_id = self.next_id()
         self.score = new_track.score
-        self._save_history(frame_id) # THÊM DÒNG NÀY
 
     def update(self, new_track, frame_id):
         """
@@ -101,7 +86,6 @@ class STrack(BaseTrack):
         self.is_activated = True
 
         self.score = new_track.score
-        self._save_history(frame_id) # THÊM DÒNG NÀY
 
     @property
     # @jit(nopython=True)
@@ -172,16 +156,6 @@ class BYTETracker(object):
         self.max_time_lost = self.buffer_size
         self.kalman_filter = KalmanFilter()
 
-        if args.kan_ckpt:
-            try:
-                from yolox.tracker.KAN.kan_matcher import KANMatcher
-                self.kan_matcher = KANMatcher(model_path=args.kan_ckpt)
-            except ImportError as e:
-                print(f"Cannot found KANMatcher: {e}")
-                self.kan_matcher = None
-        else:
-            self.kan_matcher = None
-
     def update(self, output_results, img_info, img_size):
         self.frame_id += 1
         activated_starcks = []
@@ -233,24 +207,6 @@ class BYTETracker(object):
         dists = matching.iou_distance(strack_pool, detections)
         if not self.args.mot20:
             dists = matching.fuse_score(dists, detections)
-
-        # --- THÊM LOGIC GỌI KAN MATCHER VÀO ĐÂY ---
-        if self.kan_matcher is not None:
-            # Tính Cost Matrix bằng mạng KAN
-            kan_dists = self.kan_matcher.get_kan_cost_matrix(strack_pool, detections)
-
-            # Duyệt qua ma trận và chỉ dùng KAN cho các Track có đủ 10 frame
-            for i, track in enumerate(strack_pool):
-                if track.tracklet_len < 10:
-                    # Track chưa đủ dài, hoàn toàn tin tưởng IoU
-                    kan_dists[i, :] = dists[i, :] 
-                else:
-                    # Ép KAN cost về khoảng [0, 1] bằng cách chia cho 2
-                    normalized_kan = kan_dists[i, :] / 2.0 
-                    # Giảm trọng số KAN xuống để nó đóng vai trò "hỗ trợ" thay vì "quyết định"
-                    dists[i, :] = 0.85 * dists[i, :] + 0.15 * normalized_kan
-        # ------------------------------------------
-
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
 
         for itracked, idet in matches:
