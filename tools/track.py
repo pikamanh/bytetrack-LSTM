@@ -115,6 +115,7 @@ def make_parser():
     parser.add_argument("--min-box-area", type=float, default=100, help='filter out tiny boxes')
     parser.add_argument("--mot20", dest="mot20", default=False, action="store_true", help="test mot20.")
     # predictor args
+    parser.add_argument("--kan_ckpt", default=None, type=str, help="path to KAN checkpoint (enables KAN tracker)")
     parser.add_argument("--lstm_ckpt", default=None, type=str, help="path to LSTM checkpoint (enables LSTM tracker)")
     parser.add_argument("--assoc_ckpt", default=None, type=str, help="path to LSTM association checkpoint")
     parser.add_argument("--assoc_weight", default=0.35, type=float, help="association score cost weight")
@@ -309,6 +310,8 @@ if __name__ == "__main__":
             args.experiment_name = "eval_lstm"
         elif args.xlstm_ckpt:
             args.experiment_name = "eval_xlstm"
+        elif args.kan_ckpt:
+            args.experiment_name = "eval_kan"
         else:
             args.experiment_name = "only_kalman"
 

@@ -7,7 +7,7 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 
-from models.functions import *
+from yolox.tracker.KAN.models.functions import *
 
 class SKANLinear(nn.Module):
     def __init__(self, in_features, out_features, bias=True, basis_function='shifted_softplus', device='cpu'):

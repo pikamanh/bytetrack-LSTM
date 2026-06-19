@@ -4,16 +4,16 @@ import torch.nn as nn
 def get_kan_model(model_name, layer_dims):
     model_name = model_name.lower()
     if model_name == 'faster_kan':
-        from models.faster_kan import FasterKAN
+        from yolox.tracker.KAN.models.faster_kan import FasterKAN
         return FasterKAN(layer_dims)
     elif model_name == 'fast_kan':
-        from models.fast_kan import FastKAN
+        from yolox.tracker.KAN.models.fast_kan import FastKAN
         return FastKAN(layer_dims)
     elif model_name == 'bsrbf_kan':
-        from models.bsrbf_kan import BSRBF_KAN
+        from yolox.tracker.KAN.models.bsrbf_kan import BSRBF_KAN
         return BSRBF_KAN(layer_dims)
     elif model_name == 'efficient_kan':
-        from models.efficient_kan import KAN
+        from yolox.tracker.KAN.models.efficient_kan import KAN
         return KAN(layer_dims)
     else:
         raise ValueError(f"Mô hình '{model_name}' không được hỗ trợ!")

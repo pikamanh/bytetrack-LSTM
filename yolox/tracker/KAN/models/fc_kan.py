@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from models.functions import *
+from yolox.tracker.KAN.models.functions import *
 
 class RadialBasisFunction(nn.Module):
     def __init__(

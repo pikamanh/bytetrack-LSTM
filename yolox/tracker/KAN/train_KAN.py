@@ -8,7 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from collections import defaultdict
 
-from load_model import TrajectorySiameseKAN
+from yolox.tracker.KAN.load_model import TrajectorySiameseKAN
 
 # ---------------------------------------------------------
 # 2. CONTRASTIVE LOSS
