@@ -153,6 +153,8 @@ def main():
         batch_size=args['batch_size'],
         sampler=sampler,
         num_workers=args['num_workers'],
+        pin_memory=True,
+        persistent_workers=True,
         drop_last=True
     )
 
