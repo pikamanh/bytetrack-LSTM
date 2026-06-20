@@ -50,9 +50,13 @@ def validate_reid(
     all_labels = []
 
     with torch.no_grad():
+        pbar = tqdm(
+            valid_loader,
+            desc="Validation",
+            leave=False
+        )
 
-        for imgs, motions, track_ids in valid_loader:
-
+        for imgs, motions, track_ids in pbar:
             imgs = imgs.to(device)
             motions = motions.to(device)
 
@@ -88,7 +92,7 @@ def validate_reid(
     positive_scores = []
     negative_scores = []
 
-    for i in range(N):
+    for i in tqdm(range(N), desc="Computing Similarity", leave=False):
         same_mask = (
             labels == labels[i]
         )
