@@ -56,7 +56,7 @@ def validate_reid(
             imgs = imgs.to(device)
             motions = motions.to(device)
 
-            embeddings, _ = model(
+            embeddings = model(
                 imgs,
                 motions
             )
@@ -122,6 +122,7 @@ def main():
     os.makedirs(args['output_dir'], exist_ok=True)
 
     counter = 0 #Earlystop
+    best_score = float("-inf")
     
     print(f"🚀 Bắt đầu setup training trên thiết bị: {args['device']}")
 
@@ -181,7 +182,6 @@ def main():
     # 4. VÒNG LẶP TRAINING
     for epoch in range(args['epochs']):
         model.train()
-        best_score = -999
         total_loss = 0.0
         total_ce_loss = 0.0
         total_triplet_loss = 0.0
