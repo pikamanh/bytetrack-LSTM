@@ -114,6 +114,18 @@ def make_parser():
     parser.add_argument("--match_thresh", type=float, default=0.9, help="matching threshold for tracking")
     parser.add_argument("--min-box-area", type=float, default=100, help='filter out tiny boxes')
     parser.add_argument("--mot20", dest="mot20", default=False, action="store_true", help="test mot20.")
+    parser.add_argument("--with-reid", dest="with_reid", default=False, action="store_true", help="use ReID features in ByteTrack association")
+    parser.add_argument("--fast-reid", dest="fast_reid", default=False, action="store_true", help="use FastReID backend for ReID features")
+    parser.add_argument("--deep-reid", dest="deep_reid", default=False, action="store_true", help="use deep-person-reid backend for ReID features")
+    parser.add_argument("--reid-model", type=str, default="osnet_x1_0", help="torchreid model name")
+    parser.add_argument("--reid-model-path", type=str, default="", help="path to ReID model weights")
+    parser.add_argument("--reid-device", type=str, default="cuda", help="ReID device, e.g. cuda or cpu")
+    parser.add_argument("--reid-weight", type=float, default=0.35, help="appearance cost weight when fusing IoU and ReID")
+    parser.add_argument("--reid-thresh", type=float, default=0.7, help="max cosine distance allowed before ReID cost is capped")
+    parser.add_argument("--reid-alpha", type=float, default=0.9, help="EMA momentum for track ReID features")
+    parser.add_argument("--fast-reid-config", type=str, default="", help="FastReID config yaml")
+    parser.add_argument("--fast-reid-weights", type=str, default="", help="FastReID model weights; falls back to --reid-model-path")
+    parser.add_argument("--fast-reid-batch-size", type=int, default=16, help="FastReID inference batch size")
     # predictor args
     parser.add_argument("--kan_ckpt", default=None, type=str, help="path to KAN checkpoint (enables KAN tracker)")
     parser.add_argument("--lstm_ckpt", default=None, type=str, help="path to LSTM checkpoint (enables LSTM tracker)")
@@ -253,12 +265,19 @@ def main(exp, args, num_gpu):
         gt_type = '_val_half'
     else:
         gt_type = ''
-    print('gt_type', gt_type)
+    eval_dataset = getattr(val_loader, "dataset", None)
+    gt_root = None
+    dataset_root = getattr(eval_dataset, "data_dir", None)
+    dataset_split = getattr(eval_dataset, "name", None)
+    if dataset_root and dataset_split:
+        gt_root = os.path.join(dataset_root, dataset_split)
+
     if args.mot20:
-        gtfiles = glob.glob(os.path.join('datasets/MOT20/train', '*/gt/gt{}.txt'.format(gt_type)))
+        gt_root = gt_root or os.path.join('datasets', 'MOT20', 'train')
     else:
-        gtfiles = glob.glob(os.path.join('datasets/mot/train', '*/gt/gt{}.txt'.format(gt_type)))
-    print('gt_files', gtfiles)
+        gt_root = gt_root or os.path.join('datasets', 'mot', 'train')
+
+    gtfiles = glob.glob(os.path.join(gt_root, '*/gt/gt{}.txt'.format(gt_type)))
     tsfiles = [f for f in glob.glob(os.path.join(results_folder, '*.txt')) if not os.path.basename(f).startswith('eval')]
 
     logger.info('Found {} groundtruths and {} test files.'.format(len(gtfiles), len(tsfiles)))
@@ -301,7 +320,18 @@ def main(exp, args, num_gpu):
 
 
 if __name__ == "__main__":
-    args = make_parser().parse_args()
+    parser = make_parser()
+    args = parser.parse_args()
+    if args.fast_reid and args.deep_reid:
+        parser.error("--fast-reid and --deep-reid are mutually exclusive")
+    if args.fast_reid or args.deep_reid:
+        args.with_reid = True
+    if args.fast_reid:
+        if not args.fast_reid_config:
+            parser.error("--fast-reid-config is required with --fast-reid")
+        if not args.fast_reid_weights and not args.reid_model_path:
+            parser.error("--fast-reid-weights or --reid-model-path is required with --fast-reid")
+    args.reid_backend = "fast" if args.fast_reid else "deep"
     exp = get_exp(args.exp_file, args.name)
     exp.merge(args.opts)
 
@@ -312,6 +342,8 @@ if __name__ == "__main__":
             args.experiment_name = "eval_xlstm"
         elif args.kan_ckpt:
             args.experiment_name = "eval_kan"
+        elif args.with_reid:
+            args.experiment_name = "eval_reid"
         else:
             args.experiment_name = "only_kalman"
 

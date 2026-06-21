@@ -209,7 +209,10 @@ class MOTEvaluator:
             # run tracking
             _frame_tlwhs, _frame_ids = [], []
             if outputs[0] is not None:
-                online_targets = tracker.update(outputs[0], info_imgs, self.img_size)
+                frame = None
+                if getattr(self.args, "with_reid", False) and vid_img_dir is not None:
+                    frame = os.path.join(vid_img_dir, vid_img_name, img_file_name[0])
+                online_targets = tracker.update(outputs[0], info_imgs, self.img_size, frame)
                 online_tlwhs = []
                 online_ids = []
                 online_scores = []

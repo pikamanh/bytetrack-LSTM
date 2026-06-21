@@ -7,12 +7,13 @@ import torch
 import torch.nn.functional as F
 
 from .kalman_filter import KalmanFilter
+from .reid import build_reid_extractor
 from yolox.tracker import matching
 from .basetrack import BaseTrack, TrackState
 
 class STrack(BaseTrack):
     shared_kalman = KalmanFilter()
-    def __init__(self, tlwh, score):
+    def __init__(self, tlwh, score, feat=None, alpha=0.9):
 
         # wait activate
         self._tlwh = np.asarray(tlwh, dtype=float)
@@ -22,6 +23,27 @@ class STrack(BaseTrack):
 
         self.score = score
         self.tracklet_len = 0
+        self.alpha = alpha
+        self.curr_feat = None
+        self.smooth_feat = None
+        self.features = deque([], maxlen=50)
+        if feat is not None:
+            self.update_features(feat)
+
+    def update_features(self, feat):
+        feat = np.asarray(feat, dtype=np.float32)
+        norm = np.linalg.norm(feat)
+        if norm > 0:
+            feat = feat / norm
+        self.curr_feat = feat
+        if self.smooth_feat is None:
+            self.smooth_feat = feat
+        else:
+            self.smooth_feat = self.alpha * self.smooth_feat + (1 - self.alpha) * feat
+            smooth_norm = np.linalg.norm(self.smooth_feat)
+            if smooth_norm > 0:
+                self.smooth_feat = self.smooth_feat / smooth_norm
+        self.features.append(feat)
 
     def predict(self):
         mean_state = self.mean.copy()
@@ -60,6 +82,8 @@ class STrack(BaseTrack):
         self.mean, self.covariance = self.kalman_filter.update(
             self.mean, self.covariance, self.tlwh_to_xyah(new_track.tlwh)
         )
+        if new_track.curr_feat is not None:
+            self.update_features(new_track.curr_feat)
         self.tracklet_len = 0
         self.state = TrackState.Tracked
         self.is_activated = True
@@ -82,6 +106,8 @@ class STrack(BaseTrack):
         new_tlwh = new_track.tlwh
         self.mean, self.covariance = self.kalman_filter.update(
             self.mean, self.covariance, self.tlwh_to_xyah(new_tlwh))
+        if new_track.curr_feat is not None:
+            self.update_features(new_track.curr_feat)
         self.state = TrackState.Tracked
         self.is_activated = True
 
@@ -155,8 +181,38 @@ class BYTETracker(object):
         self.buffer_size = int(frame_rate / 30.0 * args.track_buffer)
         self.max_time_lost = self.buffer_size
         self.kalman_filter = KalmanFilter()
+        self.with_reid = getattr(args, "with_reid", False)
+        self.reid_weight = getattr(args, "reid_weight", 0.35)
+        self.reid_thresh = getattr(args, "reid_thresh", 0.7)
+        self.reid_alpha = getattr(args, "reid_alpha", 0.9)
+        self.reid_extractor = None
+        if self.with_reid:
+            self.reid_extractor = build_reid_extractor(args)
 
-    def update(self, output_results, img_info, img_size):
+    def _extract_reid_features(self, frame, tlbrs):
+        if not self.with_reid or self.reid_extractor is None or frame is None or len(tlbrs) == 0:
+            return [None] * len(tlbrs)
+        features = self.reid_extractor.extract(frame, tlbrs)
+        return [feat for feat in features]
+
+    def _make_detections(self, tlbrs, scores, features):
+        return [
+            STrack(STrack.tlbr_to_tlwh(tlbr), score, feat, alpha=self.reid_alpha)
+            for tlbr, score, feat in zip(tlbrs, scores, features)
+        ]
+
+    def _fuse_reid(self, iou_dists, tracks, detections):
+        if not self.with_reid or iou_dists.size == 0:
+            return iou_dists
+        valid_tracks = all(track.smooth_feat is not None for track in tracks)
+        valid_dets = all(det.curr_feat is not None for det in detections)
+        if not valid_tracks or not valid_dets:
+            return iou_dists
+        emb_dists = matching.embedding_distance(tracks, detections)
+        emb_dists[emb_dists > self.reid_thresh] = 1.0
+        return (1 - self.reid_weight) * iou_dists + self.reid_weight * emb_dists
+
+    def update(self, output_results, img_info, img_size, frame=None):
         self.frame_id += 1
         activated_starcks = []
         refind_stracks = []
@@ -183,11 +239,12 @@ class BYTETracker(object):
         dets = bboxes[remain_inds]
         scores_keep = scores[remain_inds]
         scores_second = scores[inds_second]
+        features_keep = self._extract_reid_features(frame, dets)
+        features_second = self._extract_reid_features(frame, dets_second)
 
         if len(dets) > 0:
             '''Detections'''
-            detections = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for
-                          (tlbr, s) in zip(dets, scores_keep)]
+            detections = self._make_detections(dets, scores_keep, features_keep)
         else:
             detections = []
 
@@ -205,6 +262,7 @@ class BYTETracker(object):
         # Predict the current location with KF
         STrack.multi_predict(strack_pool)
         dists = matching.iou_distance(strack_pool, detections)
+        dists = self._fuse_reid(dists, strack_pool, detections)
         if not self.args.mot20:
             dists = matching.fuse_score(dists, detections)
         matches, u_track, u_detection = matching.linear_assignment(dists, thresh=self.args.match_thresh)
@@ -223,12 +281,12 @@ class BYTETracker(object):
         # association the untrack to the low score detections
         if len(dets_second) > 0:
             '''Detections'''
-            detections_second = [STrack(STrack.tlbr_to_tlwh(tlbr), s) for
-                          (tlbr, s) in zip(dets_second, scores_second)]
+            detections_second = self._make_detections(dets_second, scores_second, features_second)
         else:
             detections_second = []
         r_tracked_stracks = [strack_pool[i] for i in u_track if strack_pool[i].state == TrackState.Tracked]
         dists = matching.iou_distance(r_tracked_stracks, detections_second)
+        dists = self._fuse_reid(dists, r_tracked_stracks, detections_second)
         matches, u_track, u_detection_second = matching.linear_assignment(dists, thresh=0.5)
         for itracked, idet in matches:
             track = r_tracked_stracks[itracked]
