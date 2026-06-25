@@ -122,6 +122,22 @@ class TrackletReIDDataset(Dataset):
         with open(pkl_path, "rb") as f:
             tracklets = pickle.load(f)
 
+        # Remap crop paths: replace whatever prefix was baked into the pkl
+        # with the current data_root (handles path mismatch across machines).
+        crops_root = os.path.join(data_root, "crops")
+        for t in tracklets:
+            remapped = []
+            for p in t.get("crops", []):
+                # Find 'crops/' segment and keep everything after it
+                marker = "crops" + os.sep
+                idx = p.find(marker)
+                if idx != -1:
+                    rel = p[idx + len(marker):]
+                else:
+                    rel = os.path.basename(p)
+                remapped.append(os.path.join(crops_root, rel))
+            t["crops"] = remapped
+
         self.samples, pid_set = self._build_samples(tracklets)
 
         # Remap pids to contiguous [0, num_pids)
