@@ -45,7 +45,7 @@ def list_image_files(img_path):
 # CREATE_SPLITTED_DET = True
 # CREATE_SPLITTED_DET = False
 
-DATA_PATH = "datasets/sportmot"
+DATA_PATH = "datasets/football"
 OUT_PATH = os.path.join(DATA_PATH, "annotations")
 os.makedirs(OUT_PATH, exist_ok=True)
 SPLITS = ["train", "val", "test"]

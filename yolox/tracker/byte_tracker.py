@@ -286,7 +286,9 @@ class BYTETracker(object):
             detections_second = []
         r_tracked_stracks = [strack_pool[i] for i in u_track if strack_pool[i].state == TrackState.Tracked]
         dists = matching.iou_distance(r_tracked_stracks, detections_second)
-        dists = self._fuse_reid(dists, r_tracked_stracks, detections_second)
+        # dists = self._fuse_reid(dists, strack_pool, detections)
+        # if not self.args.mot20:
+        #     dists = matching.fuse_score(dists, detections)
         matches, u_track, u_detection_second = matching.linear_assignment(dists, thresh=0.5)
         for itracked, idet in matches:
             track = r_tracked_stracks[itracked]

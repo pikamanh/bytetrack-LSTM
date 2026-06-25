@@ -40,7 +40,7 @@ class Exp(MyExp):
         )
 
         dataset = MOTDataset(
-            data_dir=os.path.join(get_yolox_datadir(), "SportsMOT"),
+            data_dir=os.path.join(get_yolox_datadir(), "sportmot"),
             json_file=self.train_ann,
             name='train',
             img_size=self.input_size,
@@ -91,11 +91,11 @@ class Exp(MyExp):
 
         return train_loader
 
-    def get_eval_loader(self, batch_size, is_distributed, testdev=False, return_origin_img=False):
+    def get_eval_loader(self, batch_size, is_distributed, testdev=False):
         from yolox.data import MOTDataset, ValTransform
 
         valdataset = MOTDataset(
-            data_dir=os.path.join(get_yolox_datadir(), "SportsMOT"),
+            data_dir=os.path.join(get_yolox_datadir(), "sportmot"),
             json_file=self.val_ann,
             img_size=self.test_size,
             name='val', # change to train when running on training set
@@ -103,7 +103,6 @@ class Exp(MyExp):
                 rgb_means=(0.485, 0.456, 0.406),
                 std=(0.229, 0.224, 0.225),
             ),
-            return_origin_img=return_origin_img,
         )
 
         if is_distributed:

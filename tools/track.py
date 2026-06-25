@@ -116,9 +116,6 @@ def make_parser():
     parser.add_argument("--mot20", dest="mot20", default=False, action="store_true", help="test mot20.")
     parser.add_argument("--with-reid", dest="with_reid", default=False, action="store_true", help="use ReID features in ByteTrack association")
     parser.add_argument("--fast-reid", dest="fast_reid", default=False, action="store_true", help="use FastReID backend for ReID features")
-    parser.add_argument("--deep-reid", dest="deep_reid", default=False, action="store_true", help="use deep-person-reid backend for ReID features")
-    parser.add_argument("--reid-model", type=str, default="osnet_x1_0", help="torchreid model name")
-    parser.add_argument("--reid-model-path", type=str, default="", help="path to ReID model weights")
     parser.add_argument("--reid-device", type=str, default="cuda", help="ReID device, e.g. cuda or cpu")
     parser.add_argument("--reid-weight", type=float, default=0.35, help="appearance cost weight when fusing IoU and ReID")
     parser.add_argument("--reid-thresh", type=float, default=0.7, help="max cosine distance allowed before ReID cost is capped")
@@ -126,18 +123,6 @@ def make_parser():
     parser.add_argument("--fast-reid-config", type=str, default="", help="FastReID config yaml")
     parser.add_argument("--fast-reid-weights", type=str, default="", help="FastReID model weights; falls back to --reid-model-path")
     parser.add_argument("--fast-reid-batch-size", type=int, default=16, help="FastReID inference batch size")
-    # predictor args
-    parser.add_argument("--kan_ckpt", default=None, type=str, help="path to KAN checkpoint (enables KAN tracker)")
-    parser.add_argument("--lstm_ckpt", default=None, type=str, help="path to LSTM checkpoint (enables LSTM tracker)")
-    parser.add_argument("--assoc_ckpt", default=None, type=str, help="path to LSTM association checkpoint")
-    parser.add_argument("--assoc_weight", default=0.35, type=float, help="association score cost weight")
-    parser.add_argument("--assoc_seq_len", default=16, type=int, help="association history length")
-    parser.add_argument("--assoc_hidden_size", default=128, type=int, help="association LSTM hidden size")
-    parser.add_argument("--assoc_num_layers", default=1, type=int, help="association LSTM layers")
-    parser.add_argument("--assoc_dropout", default=0.1, type=float, help="association model dropout")
-    parser.add_argument("--assoc_mlp_hidden", default=128, type=int, help="association MLP hidden size")
-    parser.add_argument("--assoc_min_history", default=2, type=int, help="min history before association score is used")
-    parser.add_argument("--xlstm_ckpt", default=None, type=str, help="path to xLSTM checkpoint (enables xLSTM tracker)")
     return parser
 
 
@@ -285,8 +270,9 @@ def main(exp, args, num_gpu):
     logger.info('Default LAP solver \'{}\''.format(mm.lap.default_solver))
     logger.info('Loading files.')
     
-    gt = OrderedDict([(Path(f).parts[-3], mm.io.loadtxt(f, fmt='mot15-2D', min_confidence=1)) for f in gtfiles])
-    ts = OrderedDict([(os.path.splitext(Path(f).parts[-1])[0], mm.io.loadtxt(f, fmt='mot15-2D', min_confidence=-1)) for f in tsfiles])    
+    mot_csv_sep = r'\s*,\s*'
+    gt = OrderedDict([(Path(f).parts[-3], mm.io.loadtxt(f, fmt='mot15-2D', min_confidence=1, sep=mot_csv_sep)) for f in gtfiles])
+    ts = OrderedDict([(os.path.splitext(Path(f).parts[-1])[0], mm.io.loadtxt(f, fmt='mot15-2D', min_confidence=-1, sep=mot_csv_sep)) for f in tsfiles])
     
     mh = mm.metrics.create()    
     accs, names = compare_dataframes(gt, ts)
