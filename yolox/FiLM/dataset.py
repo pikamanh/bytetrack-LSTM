@@ -97,9 +97,12 @@ class TrackletReIDDataset(Dataset):
         image_size: tuple = (256, 128),
         min_tracklet_len: int = 6,    # cần ít nhất min_seq + 1 frame
         augment: bool = True,
+        cold_start_prob: float = 0.3,
     ):
         self.seq_len = seq_len
         self.min_seq = min_tracklet_len - 1   # số frame history tối thiểu trước anchor
+        self.augment = augment
+        self.cold_start_prob = cold_start_prob
 
         # Transforms
         if augment:
@@ -247,6 +250,12 @@ class TrackletReIDDataset(Dataset):
         # Trajectory history (N, 9) kết thúc ngay trước anchor
         traj_seq   = torch.from_numpy(self._build_traj_seq(tracklet, anchor_idx))
         gate_feats = torch.from_numpy(self._build_gate_feats(tracklet, anchor_idx))
+
+        # Cold-start augmentation: giả lập detection mới chưa có trajectory history
+        # Để model học embedding nhất quán giữa cold-start và conditioned
+        if self.augment and random.random() < self.cold_start_prob:
+            traj_seq   = torch.zeros_like(traj_seq)
+            gate_feats = torch.zeros_like(gate_feats)
 
         # Supervision cho motion prediction: next bounding box
         boxes    = tracklet["boxes"]

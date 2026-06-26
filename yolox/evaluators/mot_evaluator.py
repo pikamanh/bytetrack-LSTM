@@ -971,6 +971,179 @@ class MOTEvaluator:
         synchronize()
         return eval_results
 
+    def evaluate_film(
+        self,
+        model,
+        distributed=False,
+        half=False,
+        trt_file=None,
+        decoder=None,
+        test_size=None,
+        result_folder=None,
+        video_folder=None,
+    ):
+        from yolox.FiLM.film_byte_tracker import FiLMByteTracker
+
+        tensor_type = torch.cuda.HalfTensor if half else torch.cuda.FloatTensor
+        model = model.eval()
+        if half:
+            model = model.half()
+        ids = []
+        data_list = []
+        results = []
+        video_names = defaultdict()
+        progress_bar = tqdm if is_main_process() else iter
+
+        inference_time = 0
+        track_time = 0
+        n_samples = len(self.dataloader) - 1
+
+        if trt_file is not None:
+            from torch2trt import TRTModule
+            model_trt = TRTModule()
+            model_trt.load_state_dict(torch.load(trt_file))
+            x = torch.ones(1, 3, test_size[0], test_size[1]).cuda()
+            model(x)
+            model = model_trt
+
+        tracker = FiLMByteTracker(self.args)
+        ori_thresh = self.args.track_thresh
+
+        video_writer = None
+        vid_img_dir, vid_img_name = None, ''
+        if video_folder is not None:
+            os.makedirs(video_folder, exist_ok=True)
+        try:
+            vid_img_dir  = self.dataloader.dataset.data_dir
+            vid_img_name = getattr(self.dataloader.dataset, 'name', '')
+        except AttributeError:
+            pass
+
+        for cur_iter, (imgs, _, info_imgs, ids) in enumerate(
+            progress_bar(self.dataloader)
+        ):
+            with torch.no_grad():
+                imgs = imgs.type(tensor_type)
+                is_time_record = cur_iter < len(self.dataloader) - 1
+                if is_time_record:
+                    start = time.time()
+
+                outputs = model(imgs)
+                if decoder is not None:
+                    outputs = decoder(outputs, dtype=outputs.type())
+                outputs = postprocess(outputs, self.num_classes, self.confthre, self.nmsthre)
+
+                if is_time_record:
+                    infer_end = time_synchronized()
+                    inference_time += infer_end - start
+
+            output_results = self.convert_to_coco_format(outputs, info_imgs, ids)
+            data_list.extend(output_results)
+
+            # Process each frame in the batch individually (tracking is sequential)
+            batch_size_actual = imgs.shape[0]
+            for b_idx in range(batch_size_actual):
+                frame_id      = int(info_imgs[2][b_idx])
+                video_id      = int(info_imgs[3][b_idx])
+                img_file_b    = info_imgs[4][b_idx] if isinstance(info_imgs[4], (list, tuple)) else info_imgs[4]
+                video_name    = img_file_b.split('/')[0]
+                img_h_b       = int(info_imgs[0][b_idx])
+                img_w_b       = int(info_imgs[1][b_idx])
+
+                if video_name == 'MOT17-05-FRCNN' or video_name == 'MOT17-06-FRCNN':
+                    self.args.track_buffer = 14
+                elif video_name == 'MOT17-13-FRCNN' or video_name == 'MOT17-14-FRCNN':
+                    self.args.track_buffer = 25
+                else:
+                    self.args.track_buffer = 30
+
+                if video_name == 'MOT17-01-FRCNN':
+                    self.args.track_thresh = 0.65
+                elif video_name == 'MOT17-06-FRCNN':
+                    self.args.track_thresh = 0.65
+                elif video_name == 'MOT17-12-FRCNN':
+                    self.args.track_thresh = 0.7
+                elif video_name == 'MOT17-14-FRCNN':
+                    self.args.track_thresh = 0.67
+                elif video_name in ['MOT20-06', 'MOT20-08']:
+                    self.args.track_thresh = 0.3
+                else:
+                    self.args.track_thresh = ori_thresh
+
+                if video_name not in video_names:
+                    video_names[video_id] = video_name
+                if frame_id == 1:
+                    tracker = FiLMByteTracker(self.args)
+                    if len(results) != 0:
+                        result_filename = os.path.join(
+                            result_folder, '{}.txt'.format(video_names[video_id - 1])
+                        )
+                        write_results(result_filename, results)
+                        results = []
+
+                _frame_tlwhs, _frame_ids = [], []
+                if outputs[b_idx] is not None:
+                    frame = None
+                    if vid_img_dir is not None:
+                        frame = os.path.join(vid_img_dir, vid_img_name, img_file_b)
+                    # Pass per-frame img_info as scalars so tracker can scale boxes
+                    img_info_b = (img_h_b, img_w_b, frame_id, video_id, img_file_b)
+                    online_targets = tracker.update(outputs[b_idx], img_info_b, self.img_size, frame)
+                    online_tlwhs, online_ids, online_scores = [], [], []
+                    for t in online_targets:
+                        tlwh = t.tlwh
+                        tid  = t.track_id
+                        vertical = tlwh[2] / tlwh[3] > 1.6
+                        if tlwh[2] * tlwh[3] > self.args.min_box_area and not vertical:
+                            online_tlwhs.append(tlwh)
+                            online_ids.append(tid)
+                            online_scores.append(t.score)
+                    _frame_tlwhs, _frame_ids = online_tlwhs, online_ids
+                    results.append((frame_id, online_tlwhs, online_ids, online_scores))
+
+                if is_time_record and b_idx == 0:
+                    track_end = time_synchronized()
+                    track_time += track_end - infer_end
+
+                if video_folder is not None and vid_img_dir is not None:
+                    if frame_id == 1 and video_writer is not None:
+                        video_writer.release()
+                        video_writer = None
+                    if video_writer is None:
+                        vpath  = os.path.join(video_folder, '{}.mp4'.format(video_name))
+                        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                        video_writer = cv2.VideoWriter(vpath, fourcc, 30, (img_w_b, img_h_b))
+                    if frame is not None:
+                        frame_img = cv2.imread(frame) if isinstance(frame, str) else frame
+                        if frame_img is not None:
+                            for tlwh, tid in zip(_frame_tlwhs, _frame_ids):
+                                x1 = int(tlwh[0]); y1 = int(tlwh[1])
+                                w  = int(tlwh[2]); h  = int(tlwh[3])
+                                color = MOTEvaluator._get_color(tid)
+                                cv2.rectangle(frame_img, (x1, y1), (x1 + w, y1 + h), color, 2)
+                                cv2.putText(frame_img, str(tid), (x1, max(y1 - 5, 10)),
+                                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                            video_writer.write(frame_img)
+
+            if cur_iter == len(self.dataloader) - 1:
+                result_filename = os.path.join(
+                    result_folder, '{}.txt'.format(video_names[video_id])
+                )
+                write_results(result_filename, results)
+                if video_writer is not None:
+                    video_writer.release()
+                    video_writer = None
+
+        statistics = torch.cuda.FloatTensor([inference_time, track_time, n_samples])
+        if distributed:
+            data_list = gather(data_list, dst=0)
+            data_list = list(itertools.chain(*data_list))
+            torch.distributed.reduce(statistics, dst=0)
+
+        eval_results = self.evaluate_prediction(data_list, statistics)
+        synchronize()
+        return eval_results
+
     def convert_to_coco_format(self, outputs, info_imgs, ids):
         data_list = []
         for (output, img_h, img_w, img_id) in zip(
