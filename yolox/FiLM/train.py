@@ -27,6 +27,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
+from torch.utils.tensorboard import SummaryWriter
 
 try:
     from .dataset import TrackletReIDDataset, RandomIdentitySampler
@@ -91,7 +92,7 @@ def train_one_epoch(
     model.train()
     ce_fn = nn.CrossEntropyLoss(label_smoothing=ce_label_smooth)
 
-    total = {"loss": 0.0, "tri": 0.0, "ce": 0.0, "mot": 0.0}
+    total = {"loss": 0.0, "tri": 0.0, "ce": 0.0, "mot": 0.0, "gate": 0.0}
     n = 0
 
     for batch in loader:
@@ -127,6 +128,7 @@ def train_one_epoch(
         total["tri"]  += loss_tri.item() * B
         total["ce"]   += loss_ce.item() * B
         total["mot"]  += loss_mot.item() * B
+        total["gate"] += out["gate"].mean().item() * B
         n += B
 
     return {k: v / n for k, v in total.items()}
@@ -198,6 +200,10 @@ def train(args):
     scaler = GradScaler("cuda")
 
     os.makedirs(args.output_dir, exist_ok=True)
+    tb_log_dir = os.path.join(args.output_dir, "tb_logs")
+    writer     = SummaryWriter(log_dir=tb_log_dir)
+    print(f"[TensorBoard] tensorboard --logdir {tb_log_dir}")
+
     best_loss  = float("inf")
     best_epoch = -1
     best_path  = os.path.join(args.output_dir, "film_reid_best.pth")
@@ -222,8 +228,17 @@ def train(args):
             f"[Epoch {epoch + 1:03d}/{args.epochs}] "
             f"loss={metrics['loss']:.4f}  tri={metrics['tri']:.4f}  "
             f"ce={metrics['ce']:.4f}  mot={metrics['mot']:.4f}  "
-            f"lr={lr_now:.2e}"
+            f"gate={metrics['gate']:.3f}  lr={lr_now:.2e}"
         )
+
+        # ── TensorBoard logging ───────────────────────────────────────────
+        step = epoch + 1
+        writer.add_scalar("loss/total",   metrics["loss"], step)
+        writer.add_scalar("loss/triplet", metrics["tri"],  step)
+        writer.add_scalar("loss/ce",      metrics["ce"],   step)
+        writer.add_scalar("loss/motion",  metrics["mot"],  step)
+        writer.add_scalar("train/gate_mean", metrics["gate"], step)
+        writer.add_scalar("train/lr",     lr_now,          step)
 
         # ── Checkpoint payload ────────────────────────────────────────────
         ckpt = {
@@ -250,20 +265,22 @@ def train(args):
 
     # ── Luôn lưu final checkpoint sau epoch cuối ──────────────────────────
     torch.save(ckpt, final_path)
+    writer.close()
     print(f"\n[Done] Final checkpoint: {final_path}")
     print(f"[Done] Best  checkpoint: {best_path}  (epoch {best_epoch}, loss={best_loss:.4f})")
+    print(f"[Done] TensorBoard logs: {tb_log_dir}")
 
     # ── Zip nếu bật --zip ─────────────────────────────────────────────────
     if args.zip:
-        _zip_checkpoints(args.output_dir, best_path, final_path)
+        _zip_checkpoints(args.output_dir, best_path, final_path, tb_log_dir)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _zip_checkpoints(output_dir: str, best_path: str, final_path: str) -> None:
-    """Zip best + final checkpoint vào output_dir/film_reid_checkpoints.zip."""
+def _zip_checkpoints(output_dir: str, best_path: str, final_path: str, tb_log_dir: str) -> None:
+    """Zip best + final checkpoint + TensorBoard logs vào output_dir/film_reid_checkpoints.zip."""
     zip_path = os.path.join(output_dir, "film_reid_checkpoints.zip")
     files_to_zip = [p for p in [best_path, final_path] if os.path.isfile(p)]
 
@@ -276,6 +293,15 @@ def _zip_checkpoints(output_dir: str, best_path: str, final_path: str) -> None:
             arcname = os.path.basename(fpath)
             zf.write(fpath, arcname)
             print(f"[Zip] Added: {arcname}")
+
+        # Thêm toàn bộ thư mục tb_logs/
+        if os.path.isdir(tb_log_dir):
+            for root, _, files in os.walk(tb_log_dir):
+                for fname in files:
+                    fpath = os.path.join(root, fname)
+                    arcname = os.path.relpath(fpath, output_dir)
+                    zf.write(fpath, arcname)
+            print(f"[Zip] Added: tb_logs/")
 
     zip_size_mb = os.path.getsize(zip_path) / 1024 / 1024
     print(f"[Zip] Saved → {zip_path}  ({zip_size_mb:.1f} MB)")
